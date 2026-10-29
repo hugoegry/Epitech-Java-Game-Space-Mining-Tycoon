@@ -1,0 +1,200 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'org.openjfx.javafxplugin' version '0.1.0'
+    id 'jacoco'
+}
+
+group 'com.spacemining'
+version '1.0'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+javafx {
+    version = '25.0.1'
+    modules = ['javafx.controls', 'javafx.fxml', 'javafx.media', 'javafx.graphics']
+}
+
+application {
+    mainClass = 'Main'
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs = ['SpaceMining/src']
+        }
+        resources {
+            srcDirs = ['SpaceMining/src']
+            exclude '**/*.java'
+        }
+    }
+    test {
+        java {
+            srcDirs = ['SpaceMining/test']
+        }
+    }
+}
+
+jar {
+    archiveBaseName = 'SPACE-MINING-TYCOON'
+    manifest {
+        attributes('Main-Class': 'Main')
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+run {
+    workingDir = rootProject.projectDir
+}
+
+def configureFxExec = { JavaExec task, String main ->
+    task.dependsOn(classes)
+    task.mainClass = main
+    task.workingDir = rootProject.projectDir
+    task.doFirst {
+        def all = sourceSets.main.runtimeClasspath.files
+        def fxJars = all.findAll { it.name.startsWith('javafx') }
+        task.classpath = files(all.findAll { !it.name.startsWith('javafx') })
+        task.jvmArgs = [
+            '--module-path', fxJars.collect { it.absolutePath }.join(File.pathSeparator),
+            '--add-modules', 'javafx.controls,javafx.media,javafx.graphics'
+        ]
+    }
+}
+
+tasks.register('diagVideo', JavaExec) { t ->
+    t.group = 'verification'
+    t.description = 'Smoke test lecture videos JavaFX'
+    configureFxExec(t, 'tools.VideoDiag')
+}
+
+tasks.register('diagVideoRestart', JavaExec) { t ->
+    t.group = 'verification'
+    t.description = 'Test video apres plusieurs restart'
+    configureFxExec(t, 'tools.VideoRestartDiag')
+}
+
+test {
+    useJUnitPlatform()
+    finalizedBy(jacocoTestReport)
+}
+
+jacoco {
+    toolVersion = "0.8.10"
+}
+
+jacocoTestReport {
+    dependsOn test
+}
+
+def jpackageInputDir = layout.buildDirectory.dir('jpackage-input')
+def jpackageFxDir = layout.buildDirectory.dir('jpackage-javafx')
+def distDir = layout.buildDirectory.dir('dist')
+def appName = 'SPACE MINING TYCOON'
+def iconFile = file('SpaceMining/src/assets/icon/app_icon.ico')
+
+tasks.register('prepareJPackageInput', Copy) {
+    group = 'distribution'
+    description = 'Prepare jar app pour jpackage'
+    dependsOn jar
+    from(jar.archiveFile)
+    into(jpackageInputDir)
+}
+
+tasks.register('prepareJavaFxModules', Copy) {
+    group = 'distribution'
+    description = 'Copie les jars JavaFX win pour le module-path'
+    from({
+        configurations.runtimeClasspath.findAll { f ->
+            def n = f.name
+            n.startsWith('javafx-') && n.contains('-win')
+        }
+    })
+    into(jpackageFxDir)
+}
+
+tasks.register('jpackageAppImage', Exec) {
+    group = 'distribution'
+    description = 'Build app-image Windows portable (JRE inclus)'
+    dependsOn prepareJPackageInput, prepareJavaFxModules
+
+    doFirst {
+        def out = distDir.get().asFile
+        def existing = new File(out, appName)
+        if (existing.exists()) {
+            delete existing
+        }
+        out.mkdirs()
+
+        def javaHome = System.getenv('JAVA_HOME')
+        if (javaHome == null || javaHome.isBlank()) {
+            javaHome = System.getProperty('java.home')
+        }
+        def jpackage = new File(javaHome, 'bin/jpackage.exe')
+        if (!jpackage.exists()) {
+            jpackage = new File(javaHome, 'bin/jpackage')
+        }
+
+        def args = [
+            jpackage.absolutePath,
+            '--type', 'app-image',
+            '--dest', out.absolutePath,
+            '--name', appName,
+            '--app-version', version.toString(),
+            '--vendor', 'SpaceMining Team',
+            '--description', 'SPACE MINING TYCOON',
+            '--input', jpackageInputDir.get().asFile.absolutePath,
+            '--main-jar', jar.archiveFile.get().asFile.name,
+            '--main-class', 'Main',
+            '--module-path', jpackageFxDir.get().asFile.absolutePath,
+            '--add-modules', 'javafx.controls,javafx.fxml,javafx.media,javafx.graphics,javafx.base',
+            '--java-options', '--enable-native-access=ALL-UNNAMED',
+            '--java-options', '-Dfile.encoding=UTF-8'
+        ]
+        if (iconFile.exists()) {
+            args.addAll(['--icon', iconFile.absolutePath])
+        }
+        commandLine args
+    }
+}
+
+tasks.register('zipPortable', Zip) {
+    group = 'distribution'
+    description = 'Zip le dossier portable pour partage'
+    dependsOn jpackageAppImage
+    archiveBaseName = 'SPACE-MINING-TYCOON-portable-win'
+    archiveVersion = version.toString()
+    destinationDirectory = distDir
+    from(distDir.map { it.dir(appName) })
+    into(appName)
+}
+
+tasks.register('packageWin') {
+    group = 'distribution'
+    description = 'Build complet: app-image + zip portable'
+    dependsOn zipPortable
+    doLast {
+        def img = distDir.get().asFile.toPath().resolve(appName).toFile()
+        def zip = distDir.get().asFile.listFiles()?.find { it.name.endsWith('.zip') }
+        println ''
+        println '=== BUILD PORTABLE OK ==='
+        println "Dossier jouable : ${img.absolutePath}"
+        println "Exe            : ${new File(img, appName + '.exe').absolutePath}"
+        if (zip != null) println "Zip            : ${zip.absolutePath}"
+        println 'Sur un PC vierge: decompressor le zip et lancer le .exe'
+        println '========================='
+    }
+}
